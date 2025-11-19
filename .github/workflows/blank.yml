@@ -1,0 +1,65 @@
+name: RDP
+on:
+  workflow_dispatch:
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+    steps:
+
+      - name: Enable RDP
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
+
+      - name: Create RDP User
+        run: |
+          $password = "admin@123"
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          if (-not (Get-LocalUser -Name "TOOLBOXLAP" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "TOOLBOXLAP" -Password $secure
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "TOOLBOXLAP"
+          echo "PASSWORD=$password" >> $env:GITHUB_ENV
+
+      - name: Install cloudflared
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "C:\cloudflared.exe"
+
+      - name: Start Cloudflare Tunnel (Quick Tunnel)
+        run: |
+          Write-Host "Starting Cloudflare Quick Tunnel..."
+          Start-Process -FilePath "C:\cloudflared.exe" `
+            -ArgumentList "tunnel --no-autoupdate --url rdp://localhost:3389 --logfile C:\tunnel.log" `
+            -WindowStyle Hidden
+
+          Start-Sleep -Seconds 8   # đợi cloudflared sinh domain
+
+          $log = Get-Content C:\tunnel.log -Raw
+          $url = ($log | Select-String -Pattern "https://.*?\.trycloudflare\.com").Matches.Value
+
+          if (-not $url) {
+            Write-Host "Log content:"
+            Write-Host $log
+            Write-Error "❌ Không tìm thấy domain tạm thời!"
+            exit 1
+          }
+
+          echo "CF_URL=$url" >> $env:GITHUB_ENV
+          Write-Host "Cloudflare URL: $url"
+
+      - name: Show Access Info
+        run: |
+          Write-Host "`n=== RDP INFO ==="
+          Write-Host "URL: $env:CF_URL"
+          Write-Host "USER: TOOLBOXLAP"
+          Write-Host "PASS: $env:PASSWORD"
+          Write-Host "=================`n"
+
+      - name: Keep Alive
+        run: |
+          while ($true) {
+            Write-Host "RDP Active - $env:CF_URL"
+            Start-Sleep 300
+          }
