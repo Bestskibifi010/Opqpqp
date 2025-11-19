@@ -1,0 +1,86 @@
+name: Web-Control
+on:
+  workflow_dispatch:
+jobs:
+  novnc:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+    steps:
+
+      - name: Create VNC User
+        run: |
+          $password = "admin@123"
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          if (-not (Get-LocalUser -Name "TOOLBOXLAP" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "TOOLBOXLAP" -Password $secure
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP"
+          echo "VNC_PASSWORD=$password" >> $env:GITHUB_ENV
+
+      - name: Open Ports
+        run: |
+          netsh advfirewall firewall add rule name="VNC" dir=in action=allow protocol=TCP localport=5900
+          netsh advfirewall firewall add rule name="noVNC" dir=in action=allow protocol=TCP localport=6080
+
+      - name: Install LiteVNC
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/cirosec-studis/litevnc/releases/latest/download/litevnc.exe" -OutFile "C:\litevnc.exe"
+
+      - name: Start VNC Server (LiteVNC)
+        run: |
+          Start-Process "C:\litevnc.exe" -ArgumentList "--password=$env:VNC_PASSWORD --port=5900 --loop" -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+
+      - name: Install noVNC
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/heads/master.zip" -OutFile "C:\novnc.zip"
+          Expand-Archive -Path "C:\novnc.zip" -DestinationPath "C:\"
+          Rename-Item "C:\noVNC-master" "C:\novnc"
+
+          Invoke-WebRequest -Uri "https://github.com/novnc/websockify/archive/refs/heads/master.zip" -OutFile "C:\websockify.zip"
+          Expand-Archive -Path "C:\websockify.zip" -DestinationPath "C:\"
+          Rename-Item "C:\websockify-master" "C:\websockify"
+
+      - name: Start Websockify (noVNC)
+        run: |
+          Start-Process powershell -ArgumentList "python C:\websockify\websockify.py 6080 localhost:5900" -WindowStyle Hidden
+          Start-Sleep -Seconds 5
+
+      - name: Install cloudflared
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "C:\cloudflared.exe"
+
+      - name: Start Cloudflare Tunnel
+        run: |
+          Start-Process -FilePath "C:\cloudflared.exe" `
+            -ArgumentList "tunnel --url http://localhost:6080 --logfile C:\tunnel.log" `
+            -WindowStyle Hidden
+
+          Start-Sleep -Seconds 10
+          $log = Get-Content C:\tunnel.log -Raw
+          $url = ($log | Select-String -Pattern \"https://.*?\.trycloudflare\.com\").Matches.Value
+
+          if (-not $url) {
+            Write-Host \"Cloudflared Log:\"
+            Write-Host $log
+            Write-Error \"❌ Không tìm thấy URL .trycloudflare.com\"
+            exit 1
+          }
+
+          echo \"CF_URL=$url\" >> $env:GITHUB_ENV
+
+      - name: Show Access Info
+        run: |
+          Write-Host "==============================="
+          Write-Host "  Web Control Ready!"
+          Write-Host "  URL: $env:CF_URL"
+          Write-Host "  USER: TOOLBOXLAP"
+          Write-Host "  PASS: $env:VNC_PASSWORD"
+          Write-Host "==============================="
+
+      - name: Keep Alive
+        run: |
+          while ($true) {
+            Write-Host "Active - $env:CF_URL"
+            Start-Sleep 300
+          }
