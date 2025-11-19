@@ -1,0 +1,79 @@
+name: Web-Control
+on:
+  workflow_dispatch:
+jobs:
+  novnc:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+    steps:
+
+      - name: Enable VNC User
+        run: |
+          $password = "admin@123"
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          if (-not (Get-LocalUser -Name "TOOLBOXLAP" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "TOOLBOXLAP" -Password $secure
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP"
+          echo "VNC_PASSWORD=$password" >> $env:GITHUB_ENV
+
+      - name: Allow VNC Port
+        run: |
+          netsh advfirewall firewall add rule name="VNC" dir=in action=allow protocol=TCP localport=5900
+          netsh advfirewall firewall add rule name="noVNC" dir=in action=allow protocol=TCP localport=6080
+
+      - name: Install TigerVNC
+        run: |
+          Invoke-WebRequest -Uri "https://downloads.sourceforge.net/project/tigervnc/stable/1.13.1/tigervnc-1.13.1.exe" -OutFile "$env:TEMP\vnc.exe"
+          Start-Process "$env:TEMP\vnc.exe" -ArgumentList "/S" -Wait
+
+      - name: Start VNC Server
+        run: |
+          mkdir C:\vnc
+          Set-Content -Path C:\vnc\passwd -Value $env:VNC_PASSWORD
+          & "C:\Program Files\TigerVNC\vncserver.exe" -passwd C:\vnc\passwd
+
+      - name: Install noVNC
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/heads/master.zip" -OutFile "C:\novnc.zip"
+          Expand-Archive -Path "C:\novnc.zip" -DestinationPath "C:\"
+          Rename-Item "C:\noVNC-master" "C:\novnc"
+
+      - name: Install Websockify
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/novnc/websockify/archive/refs/heads/master.zip" -OutFile "C:\websockify.zip"
+          Expand-Archive -Path "C:\websockify.zip" -DestinationPath "C:\"
+          Rename-Item "C:\websockify-master" "C:\websockify"
+
+      - name: Start noVNC
+        run: |
+          Start-Process powershell -ArgumentList "python C:\websockify\websockify.py 6080 localhost:5900" -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+
+      - name: Install cloudflared
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "C:\cloudflared.exe"
+
+      - name: Start Cloudflare Tunnel for noVNC
+        run: |
+          Start-Process -FilePath "C:\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080 --logfile C:\tunnel.log" -WindowStyle Hidden
+          Start-Sleep -Seconds 8
+          $log = Get-Content C:\tunnel.log -Raw
+          $url = ($log | Select-String -Pattern "https://.*?\.trycloudflare\.com").Matches.Value
+          echo "CF_URL=$url" >> $env:GITHUB_ENV
+
+      - name: Show Web Control Info
+        run: |
+          Write-Host "==============================="
+          Write-Host "  Web Control (noVNC) Ready!"
+          Write-Host "  URL: $env:CF_URL"
+          Write-Host "  VNC USER: TOOLBOXLAP"
+          Write-Host "  VNC PASS: $env:VNC_PASSWORD"
+          Write-Host "==============================="
+
+      - name: Keep Alive
+        run: |
+          while ($true) {
+            Write-Host "Active - $env:CF_URL"
+            Start-Sleep 300
+          }
