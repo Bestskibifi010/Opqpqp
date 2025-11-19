@@ -1,0 +1,85 @@
+name: RDP
+on:
+  workflow_dispatch:
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+    steps:
+
+      # -----------------------------
+      # RDP CONFIG
+      # -----------------------------
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Cloudflare"
+          netsh advfirewall firewall add rule name="RDP-Cloudflare" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
+
+      # -----------------------------
+      # CREATE RDP USER
+      # -----------------------------
+      - name: Create RDP User with Static Password
+        run: |
+          $password = "admin@123"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name "TOOLBOXLAP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "TOOLBOXLAP" -Password $securePass -AccountNeverExpires
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "TOOLBOXLAP"
+
+          echo "RDP_CREDS=User: TOOLBOXLAP | Password: $password" >> $env:GITHUB_ENV
+
+      # -----------------------------
+      # INSTALL CLOUDFLARED
+      # -----------------------------
+      - name: Install Cloudflare Tunnel
+        run: |
+          $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          $cfPath = "C:\cloudflared.exe"
+          Invoke-WebRequest -Uri $cfUrl -OutFile $cfPath
+          echo "C:\cloudflared.exe" >> $env:GITHUB_PATH
+
+      # -----------------------------
+      # START TEMPORARY TUNNEL
+      # -----------------------------
+      - name: Start Cloudflare Tunnel for RDP
+        run: |
+          Write-Host "Starting temporary Cloudflare Tunnel..."
+          $tunnelOutput = & C:\cloudflared.exe tunnel --url rdp://localhost:3389 2>&1
+          Write-Host $tunnelOutput
+          
+          $url = ($tunnelOutput | Select-String -Pattern "https://.*?\.trycloudflare\.com").Matches.Value
+          if (-not $url) {
+              Write-Error "Failed to detect Cloudflare Tunnel URL"
+              exit 1
+          }
+
+          echo "CF_URL=$url" >> $env:GITHUB_ENV
+
+      # -----------------------------
+      # SHOW CONNECTION INFO
+      # -----------------------------
+      - name: Display RDP Access Information
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Cloudflare Tunnel: $env:CF_URL"
+          Write-Host "Username: TOOLBOXLAP"
+          Write-Host "Password: admin@123"
+          Write-Host "==================`n"
+
+      # -----------------------------
+      # KEEP RUNNER ALIVE
+      # -----------------------------
+      - name: Maintain Connection
+        run: |
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Tunnel: $env:CF_URL"
+              Start-Sleep -Seconds 300
+          }
