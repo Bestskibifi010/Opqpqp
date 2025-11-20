@@ -1,0 +1,110 @@
+name: Web-Control
+on:
+  workflow_dispatch:
+
+jobs:
+  novnc:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Tạo user RDP (tuỳ chọn, để sau này cần RDP vẫn dùng được)
+        run: |
+          $password = "admin@123"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name "TOOLBOXLAP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "TOOLBOXLAP" -Password $securePass -AccountNeverExpires
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "TOOLBOXLAP"
+
+          echo "RDP_CREDS=User: TOOLBOXLAP | Password: $password" >> $env:GITHUB_ENV
+
+      - name: Cài UltraVNC qua Chocolatey
+        run: |
+          choco install ultravnc -y
+
+          $iniPath = "C:\Program Files\uvnc bvba\UltraVNC\ultravnc.ini"
+
+          @"
+[Permissions]
+[admin]
+MSLogonRequired=0
+NewMSLogon=0
+AuthRequired=0
+AllowLoopback=1
+
+[ultravnc]
+passwd=
+passwd2=
+"@ | Set-Content -Path $iniPath -Encoding ASCII
+
+          # Cài / đăng ký service và khởi động VNC server
+          & "C:\Program Files\uvnc bvba\UltraVNC\winvnc.exe" -service
+          Start-Sleep -Seconds 5
+          Start-Service -Name "uvnc_service"
+          Start-Sleep -Seconds 5
+
+      - name: (Tuỳ chọn) Mở port VNC trong firewall nội bộ
+        run: |
+          netsh advfirewall firewall add rule name="VNC-Local" dir=in action=allow protocol=TCP localport=5900
+
+      - name: Cài noVNC và chạy proxy
+        run: |
+          git clone https://github.com/novnc/noVNC.git C:\noVNC
+          cd C:\noVNC
+
+          # Chạy novnc_proxy ở background, map localhost:6080 -> VNC localhost:5900
+          $ps = "cd C:\noVNC; py -3 .\utils\novnc_proxy --vnc localhost:5900 --listen 6080"
+          $args = "-NoProfile -Command `"$ps`""
+          Start-Process powershell.exe -ArgumentList $args
+
+          Start-Sleep -Seconds 10
+          Write-Host "noVNC proxy đang lắng nghe ở http://localhost:6080/vnc.html"
+
+      - name: Cài Cloudflared
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\cloudflared | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "C:\cloudflared\cloudflared.exe"
+
+      - name: Tạo quick tunnel .trycloudflare.com và giữ session
+        run: |
+          $log = "$env:TEMP\cloudflared.log"
+          $cfArgs = "tunnel --url http://localhost:6080"
+
+          # Chạy cloudflared ở background, log ra file
+          Start-Process -FilePath "C:\cloudflared\cloudflared.exe" -ArgumentList $cfArgs -RedirectStandardOutput $log -RedirectStandardError $log -NoNewWindow
+
+          Write-Host "Đang chờ Cloudflare cấp domain .trycloudflare.com ..."
+
+          $domain = $null
+          for ($i=0; $i -lt 60 -and -not $domain; $i++) {
+            if (Test-Path $log) {
+              $lines = Get-Content $log
+              foreach ($line in $lines) {
+                if ($line -match "https://[a-zA-Z0-9\-\.]+\.trycloudflare\.com") {
+                  $domain = $matches[0]
+                  break
+                }
+              }
+            }
+            Start-Sleep -Seconds 2
+          }
+
+          if ($domain) {
+            Write-Host "================================="
+            Write-Host "  URL noVNC: $domain/vnc.html"
+            Write-Host "  VNC backend: localhost:5900"
+            Write-Host "================================="
+          } else {
+            Write-Warning "Không tìm được domain tạm thời trong log cloudflared."
+            Write-Warning "Kéo log step này lên, tìm tay chuỗi https://....trycloudflare.com trong output cloudflared."
+          }
+
+          # Giữ runner sống cho bạn điều khiển
+          while ($true) {
+            Write-Host "[$(Get-Date)] phiên noVNC vẫn đang chạy..."
+            Start-Sleep -Seconds 300
+          }
